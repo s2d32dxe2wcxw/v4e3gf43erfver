@@ -1,0 +1,1451 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local Camera = Workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+
+-- Store active ESPs
+local espCache = {}
+
+-- Create Billboard GUI for a character
+local function createESP(player)
+    if player == LocalPlayer then return end
+    if not player.Character or not player.Character:FindFirstChild("Head") then return end
+
+    local head = player.Character:FindFirstChild("Head")
+    local existingESP = espCache[player]
+
+    if existingESP then
+        existingESP:Destroy()
+    end
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "PlayerESP"
+    billboard.Adornee = head
+    billboard.Size = UDim2.new(0, 100, 0, 40)
+    billboard.AlwaysOnTop = true
+    billboard.LightInfluence = 0
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, 0, 1, 0)
+    label.BackgroundTransparency = 1
+    label.Text = player.Name
+    label.TextColor3 = Color3.fromRGB(255, 0, 0)
+    label.TextStrokeTransparency = 0.5
+    label.Font = Enum.Font.SourceSansBold
+    label.TextScaled = true
+    label.Parent = billboard
+
+    billboard.Parent = player.Character
+    espCache[player] = billboard
+end
+
+-- Remove ESP if player leaves
+local function removeESP(player)
+    if espCache[player] then
+        espCache[player]:Destroy()
+        espCache[player] = nil
+    end
+end
+
+-- Handle character spawning and maintain ESP
+local function onCharacterAdded(player)
+    player.CharacterAdded:Connect(function(character)
+        if player ~= LocalPlayer and espCache[player] then
+            createESP(player)
+        end
+    end)
+    if player.Character and espCache[player] then
+        createESP(player)
+    end
+end
+
+-- Setup ESP for existing and new players when enabled
+local function setupESP()
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and espCache[player] then
+            onCharacterAdded(player)
+        end
+    end
+    Players.PlayerAdded:Connect(function(player)
+        if player ~= LocalPlayer and espCache[player] then
+            onCharacterAdded(player)
+        end
+    end)
+end
+
+-- Remove ESP on player leave
+Players.PlayerRemoving:Connect(removeESP)
+
+-- Auto-clean ESPs from dead characters
+RunService.RenderStepped:Connect(function()
+    for player, esp in pairs(espCache) do
+        if not player or not player.Character or not player.Character:FindFirstChild("Head") then
+            if esp then
+                esp:Destroy()
+                espCache[player] = nil
+            end
+        end
+    end
+end)
+
+-- User Configurable Settings
+local TELEPORT_DISTANCE = 5 -- Distance in studs to teleport to NPC
+local JUMP_POWER = 60 -- Super jump height in studs
+local cframeSpeed = 1.0 -- Increased speed for Auto Move to NPCs
+
+-- GUI and State Setup
+local player = Players.LocalPlayer
+local screenGui = nil
+local mainFrame = nil
+local state = {
+    enabledNPC = false,
+    enabledPlayer = false,
+    autoMoveEnabled = false,
+    flying = false,
+    wasdEnabled = false,
+    superJumpEnabled = false,
+    groundPlatformActive = false,
+    guiVisible = true,
+    espEnabled = false,
+    spectateMode = false,
+    onSecondPage = false,
+    teleportEnabled = false,
+    teleportKey = Enum.KeyCode.T,
+    noclipEnabled = false,
+    weirdEnabled = false
+}
+local initialPosition = nil
+local isSpectating = false
+local currentTargetIndex = 1
+local targets = {}
+local cameraOffset = Vector3.new(0, 5, -10)
+local cameraAngle = Vector2.new(0, 0)
+local mouseLocked = false
+local minDistance = 5
+local maxDistance = 20
+local currentZoom = 10
+
+local function initializeGUI()
+    print("Script: Starting GUI initialization at ", tick())
+    
+    -- Create ScreenGui
+    local success, result = pcall(function()
+        screenGui = Instance.new("ScreenGui")
+        screenGui.Name = "HitboxControlGUI"
+        screenGui.Parent = player:WaitForChild("PlayerGui", 10)
+        screenGui.Enabled = true
+        screenGui.ResetOnSpawn = false
+        print("ScreenGui created and parented")
+        return screenGui
+    end)
+    if not success then
+        warn("Failed to create ScreenGui: ", result)
+        return false
+    end
+
+    -- Create Main Frame
+    success, result = pcall(function()
+        mainFrame = Instance.new("Frame")
+        mainFrame.Size = UDim2.new(0, 400, 0, 960)
+        mainFrame.Position = UDim2.new(0.5, -200, 0.5, -480)
+        mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+        mainFrame.BorderSizePixel = 0
+        mainFrame.Parent = screenGui
+        print("MainFrame created: Position=", mainFrame.Position)
+        return mainFrame
+    end)
+    if not success then
+        warn("Failed to create MainFrame: ", result)
+        return false
+    end
+    initialPosition = mainFrame.Position
+
+    -- Create Title Label
+    local titleLabel
+    success, result = pcall(function()
+        titleLabel = Instance.new("TextLabel")
+        titleLabel.Size = UDim2.new(1, 0, 0, 50)
+        titleLabel.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+        titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+        titleLabel.Text = "Hitbox Control GUI"
+        titleLabel.Font = Enum.Font.SourceSansBold
+        titleLabel.TextSize = 24
+        titleLabel.Parent = mainFrame
+        print("TitleLabel created")
+        return titleLabel
+    end)
+    if not success then
+        warn("Failed to create TitleLabel: ", result)
+        return false
+    end
+
+    -- Create Close Button
+    local closeButton
+    success, result = pcall(function()
+        closeButton = Instance.new("TextButton")
+        closeButton.Size = UDim2.new(0, 50, 0, 50)
+        closeButton.Position = UDim2.new(1, -50, 0, 0)
+        closeButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+        closeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        closeButton.Text = "X"
+        closeButton.Font = Enum.Font.SourceSansBold
+        closeButton.TextSize = 20
+        closeButton.Parent = titleLabel
+        print("CloseButton created")
+        return closeButton
+    end)
+    if not success then
+        warn("Failed to create CloseButton: ", result)
+        return false
+    end
+
+    -- Create OP Frame
+    local opFrame
+    success, result = pcall(function()
+        opFrame = Instance.new("Frame")
+        opFrame.Size = UDim2.new(0, 400, 0, 960)
+        opFrame.Position = UDim2.new(0.5, -200, 0.5, -480)
+        opFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+        opFrame.BorderSizePixel = 0
+        opFrame.Parent = screenGui
+        opFrame.Visible = false
+        print("OP Frame created")
+        return opFrame
+    end)
+    if not success then
+        warn("Failed to create OP Frame: ", result)
+        return false
+    end
+
+    -- Create Arrow Button on Main Frame
+    local mainArrowButton
+    success, result = pcall(function()
+        mainArrowButton = Instance.new("TextButton")
+        mainArrowButton.Size = UDim2.new(0, 30, 0, 30)
+        mainArrowButton.Position = UDim2.new(0, 5, 0, 10)
+        mainArrowButton.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+        mainArrowButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        mainArrowButton.Text = ">"
+        mainArrowButton.Font = Enum.Font.SourceSansBold
+        mainArrowButton.TextSize = 20
+        mainArrowButton.Parent = titleLabel
+        print("MainArrowButton created")
+        return mainArrowButton
+    end)
+    if not success then
+        warn("Failed to create MainArrowButton: ", result)
+        return false
+    end
+
+    -- Create Arrow Button on OP Frame
+    local opArrowButton
+    success, result = pcall(function()
+        opArrowButton = Instance.new("TextButton")
+        opArrowButton.Size = UDim2.new(0, 30, 0, 30)
+        opArrowButton.Position = UDim2.new(1, -35, 0, 10)
+        opArrowButton.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+        opArrowButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        opArrowButton.Text = "<"
+        opArrowButton.Font = Enum.Font.SourceSansBold
+        opArrowButton.TextSize = 20
+        opArrowButton.Parent = opFrame
+        print("OP ArrowButton created")
+        return opArrowButton
+    end)
+    if not success then
+        warn("Failed to create OP ArrowButton: ", result)
+        return false
+    end
+
+    -- NPC Hitbox Expander Settings
+    local npcHitboxSize = Vector3.new(50, 50, 50)
+    local npcTransparency = 0.5
+    local npcTargetPartNames = { "Torso", "UpperTorso", "LowerTorso", "HumanoidRootPart" }
+    local npcConnection = nil
+    local npcOriginalProperties = {}
+
+    -- Player Hitbox Expander Settings
+    local playerHitboxSize = Vector3.new(80, 80, 80)
+    local playerTransparency = 0.5
+    local playerExpandPartNames = { "Torso", "UpperTorso", "LowerTorso", "HumanoidRootPart" }
+    local playerConnection = nil
+    local playerOriginalProperties = {}
+
+    -- Auto-Move Settings
+    local autoMoveTargetPartNames = { "Torso", "UpperTorso", "LowerTorso", "HumanoidRootPart" }
+    local targetNPC = nil
+    local teleportedNPCs = {}
+
+    -- Fly Platform Settings
+    local flyPlatform
+    success, result = pcall(function()
+        flyPlatform = Instance.new("Part")
+        flyPlatform.Size = Vector3.new(5, 1, 5)
+        flyPlatform.Anchored = true
+        flyPlatform.Transparency = 1
+        flyPlatform.CanCollide = true
+        flyPlatform.Parent = Workspace
+        print("Fly Platform created")
+        return flyPlatform
+    end)
+    if not success then
+        warn("Failed to create Fly Platform: ", result)
+        flyPlatform = nil
+    end
+
+    -- Ground Platform Settings
+    local groundPlatform = nil
+    local groundPlatformY = 0
+    local groundTargetY = 0
+    local groundLifting = false
+    local groundLiftTime = 0
+    local LIFT_DURATION = 1
+    local CHARACTER_HEIGHT = 5.0
+
+    local function createGroundPlatform()
+        local attempts = 3
+        for i = 1, attempts do
+            local success, part = pcall(function()
+                local p = Instance.new("Part")
+                p.Name = "GroundPlatform"
+                p.Size = Vector3.new(5, 1, 5)
+                p.Anchored = true
+                p.Transparency = 1
+                p.CanCollide = false
+                p.Position = Vector3.new(0, -100, 0)
+                p.BrickColor = BrickColor.new("Bright blue")
+                p.Parent = Workspace
+                return p
+            end)
+            if success and part then
+                print("Ground Platform created: Name=", part.Name)
+                return part
+            end
+            warn("Ground Platform creation attempt ", i, " failed: ", part)
+            wait(0.1)
+        end
+        warn("Failed to create Ground Platform after ", attempts, " attempts")
+        return nil
+    end
+    groundPlatform = createGroundPlatform()
+
+    -- WASD Movement Settings
+    local wasdSpeed = 0.6
+    local keys = { W = false, A = false, S = false, D = false }
+    local keyConnections = {}
+
+    -- ESP Settings
+    local espFolder = Instance.new("Folder")
+    espFolder.Name = "PlayerESP"
+    espFolder.Parent = Workspace
+
+    local function createESP(character)
+        if not character or not character:FindFirstChild("HumanoidRootPart") then return end
+        
+        local playerName = character.Name
+        local billboardGui = Instance.new("BillboardGui")
+        billboardGui.Name = "ESP_" .. playerName
+        billboardGui.AlwaysOnTop = true
+        billboardGui.Size = UDim2.new(0, 200, 0, 50)
+        billboardGui.StudsOffset = Vector3.new(0, 2.5, 0)
+        billboardGui.Adornee = character:WaitForChild("HumanoidRootPart")
+        billboardGui.Parent = espFolder
+        
+        local textLabel = Instance.new("TextLabel")
+        textLabel.Size = UDim2.new(1, 0, 1, 0)
+        textLabel.BackgroundTransparency = 1
+        textLabel.Text = playerName
+        textLabel.TextColor3 = Color3.new(1, 0, 0)
+        textLabel.TextStrokeTransparency = 0
+        textLabel.TextStrokeColor3 = Color3.new(0.5, 0, 0)
+        textLabel.TextSize = 16
+        textLabel.Font = Enum.Font.SourceSansBold
+        textLabel.Parent = billboardGui
+        
+        local outlineGlow = Instance.new("TextLabel")
+        outlineGlow.Size = UDim2.new(1, 4, 1, 4)
+        outlineGlow.Position = UDim2.new(0, -2, 0, -2)
+        outlineGlow.BackgroundTransparency = 1
+        outlineGlow.Text = playerName
+        outlineGlow.TextColor3 = Color3.new(1, 0.2, 0.2)
+        outlineGlow.TextTransparency = 0.5
+        outlineGlow.TextStrokeTransparency = 0.7
+        outlineGlow.TextStrokeColor3 = Color3.new(0.3, 0, 0)
+        outlineGlow.Font = Enum.Font.SourceSansBold
+        outlineGlow.TextSize = 16
+        outlineGlow.Parent = billboardGui
+    end
+
+    local function updateESP()
+        espFolder:ClearAllChildren()
+        if state.espEnabled then
+            for _, plr in pairs(Players:GetPlayers()) do
+                if plr ~= player and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
+                    createESP(plr.Character)
+                end
+            end
+        end
+    end
+
+    -- Spectate Functions
+    local function updateTargets()
+        targets = {}
+        for _, plr in pairs(Players:GetPlayers()) do
+            if plr ~= player and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
+                table.insert(targets, plr)
+            end
+        end
+        if #targets == 0 then
+            isSpectating = false
+            Camera.CameraType = Enum.CameraType.Custom
+            Camera.CameraSubject = player.Character and player.Character:FindFirstChild("Humanoid")
+            Camera.FieldOfView = 70
+            print("No targets available, reverting to player view")
+        end
+    end
+
+    local function updateCamera()
+        if not isSpectating or #targets == 0 then return end
+        local target = targets[currentTargetIndex]
+        if target and target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
+            local hrp = target.Character.HumanoidRootPart
+            local distance = math.clamp((cameraOffset - Vector3.new(0, 0, 0)).Magnitude, minDistance, maxDistance)
+            local offsetDirection = Vector3.new(0, cameraOffset.Y, -distance)
+            local baseCFrame = CFrame.new(hrp.Position)
+            local rotatedCFrame = baseCFrame * CFrame.Angles(0, math.rad(cameraAngle.X), 0)
+            rotatedCFrame = rotatedCFrame * CFrame.Angles(math.rad(cameraAngle.Y), 0, 0)
+            local cameraCFrame = rotatedCFrame * CFrame.new(offsetDirection)
+            local lookAt = hrp.Position + Vector3.new(0, 2, 0)
+            Camera.CFrame = CFrame.new(cameraCFrame.Position, lookAt)
+            Camera.CameraType = Enum.CameraType.Scriptable
+            Camera.FieldOfView = 90
+            print("Spectating: ", target.Name)
+        else
+            isSpectating = false
+            Camera.CameraType = Enum.CameraType.Custom
+            Camera.CameraSubject = player.Character and player.Character:FindFirstChild("Humanoid")
+            Camera.FieldOfView = 70
+            print("Target lost, reverting to player view")
+        end
+    end
+
+    local function cycleTarget(forward)
+        if #targets == 0 then return end
+        if forward then
+            currentTargetIndex = currentTargetIndex % #targets + 1
+        else
+            currentTargetIndex = (currentTargetIndex - 2) % #targets + 1
+        end
+        updateCamera()
+        print("Switched to: ", targets[currentTargetIndex].Name)
+    end
+
+    local function handleMouseInput(input)
+        if not isSpectating or not mouseLocked then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement then
+            local delta = input.Delta
+            cameraAngle = cameraAngle + Vector2.new(delta.X * 0.2, -delta.Y * 0.2)
+            cameraAngle = Vector2.new(
+                math.clamp(cameraAngle.X, -180, 180),
+                math.clamp(cameraAngle.Y, -80, 80)
+            )
+        elseif input.UserInputType == Enum.UserInputType.MouseWheel then
+            local zoomDelta = input.Position.Z * 0.5
+            local newZ = cameraOffset.Z + zoomDelta
+            cameraOffset = Vector3.new(0, cameraOffset.Y, math.clamp(newZ, -maxDistance, -minDistance))
+        end
+    end
+
+    -- NPC Hitbox Expander Functions
+    local function isNPC(part)
+        if part:IsA("BasePart") and table.find(npcTargetPartNames, part.Name) then
+            local model = part:FindFirstAncestorOfClass("Model")
+            if model and not Players:GetPlayerFromCharacter(model) then
+                return true
+            end
+        end
+        return false
+    end
+
+    local function applyNPCHitboxChanges(part)
+        if isNPC(part) then
+            if not npcOriginalProperties[part] then
+                npcOriginalProperties[part] = {
+                    Size = part.Size,
+                    Transparency = part.Transparency,
+                    CanCollide = part.CanCollide,
+                    Material = part.Material
+                }
+            end
+            part.Size = npcHitboxSize
+            part.Transparency = npcTransparency
+            part.CanCollide = false
+            part.Material = Enum.Material.ForceField
+        end
+    end
+
+    local function revertNPCHitboxChanges(part)
+        if isNPC(part) and npcOriginalProperties[part] then
+            part.Size = npcOriginalProperties[part].Size
+            part.Transparency = npcOriginalProperties[part].Transparency
+            part.CanCollide = npcOriginalProperties[part].CanCollide
+            part.Material = npcOriginalProperties[part].Material
+            npcOriginalProperties[part] = nil
+        end
+    end
+
+    -- Player Hitbox Expander Functions
+    local function isValidPlayerTarget(part)
+        if part:IsA("BasePart") and table.find(playerExpandPartNames, part.Name) then
+            local model = part:FindFirstAncestorOfClass("Model")
+            if model and Players:GetPlayerFromCharacter(model) and model ~= Players.LocalPlayer.Character then
+                return true
+            end
+        end
+        return false
+    end
+
+    local function applyPlayerHitboxChanges(part)
+        if isValidPlayerTarget(part) then
+            if not playerOriginalProperties[part] then
+                playerOriginalProperties[part] = {
+                    Size = part.Size,
+                    Transparency = part.Transparency,
+                    CanCollide = part.CanCollide,
+                    Material = part.Material
+                }
+            end
+            part.Size = playerHitboxSize
+            part.Transparency = playerTransparency
+            part.CanCollide = false
+            part.Material = Enum.Material.ForceField
+        end
+    end
+
+    local function revertPlayerHitboxChanges(part)
+        if isValidPlayerTarget(part) and playerOriginalProperties[part] then
+            part.Size = playerOriginalProperties[part].Size
+            part.Transparency = playerOriginalProperties[part].Transparency
+            part.CanCollide = playerOriginalProperties[part].CanCollide
+            part.Material = playerOriginalProperties[part].Material
+            playerOriginalProperties[part] = nil
+        end
+    end
+
+    -- Auto-Move Functions
+    local function isAutoMoveNPC(part)
+        if part:IsA("BasePart") and table.find(autoMoveTargetPartNames, part.Name) then
+            local model = part:FindFirstAncestorOfClass("Model")
+            if model and not Players:GetPlayerFromCharacter(model) then
+                return true, model
+            end
+        end
+        return false, nil
+    end
+
+    local function findClosestNPC(playerHRP)
+        local closestNPC = nil
+        local closestDistance = math.huge
+        for _, obj in ipairs(Workspace:GetDescendants()) do
+            local isValid, model = isAutoMoveNPC(obj)
+            if isValid and obj.Name == "HumanoidRootPart" and not teleportedNPCs[obj] then
+                local humanoid = model and model:FindFirstChildOfClass("Humanoid")
+                if humanoid and humanoid.Health > 0 and humanoid.Parent == model then
+                    local distance = (playerHRP.Position - obj.Position).Magnitude
+                    if distance < closestDistance then
+                        closestDistance = distance
+                        closestNPC = obj
+                    end
+                end
+            end
+        end
+        return closestNPC, closestDistance
+    end
+
+    -- Toggle Buttons
+    local npcToggleButton
+    success, result = pcall(function()
+        npcToggleButton = Instance.new("TextButton")
+        npcToggleButton.Size = UDim2.new(0.9, 0, 0, 60)
+        npcToggleButton.Position = UDim2.new(0.05, 0, 0.1, 10)
+        npcToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+        npcToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        npcToggleButton.Text = "NPC Hitbox Expander: " .. (state.enabledNPC and "ON" or "OFF")
+        npcToggleButton.Font = Enum.Font.SourceSans
+        npcToggleButton.TextSize = 18
+        npcToggleButton.Parent = mainFrame
+        npcToggleButton.BackgroundColor3 = state.enabledNPC and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        print("NPC Toggle Button created")
+        return npcToggleButton
+    end)
+    if not success then
+        warn("Failed to create NPC Toggle Button: ", result)
+        return false
+    end
+
+    npcToggleButton.MouseButton1Click:Connect(function()
+        state.enabledNPC = not state.enabledNPC
+        npcToggleButton.Text = "NPC Hitbox Expander: " .. (state.enabledNPC and "ON" or "OFF")
+        npcToggleButton.BackgroundColor3 = state.enabledNPC and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        if state.enabledNPC then
+            for _, obj in ipairs(Workspace:GetDescendants()) do
+                applyNPCHitboxChanges(obj)
+            end
+            npcConnection = Workspace.DescendantAdded:Connect(applyNPCHitboxChanges)
+        else
+            if npcConnection then
+                npcConnection:Disconnect()
+                npcConnection = nil
+            end
+            for _, obj in ipairs(Workspace:GetDescendants()) do
+                revertNPCHitboxChanges(obj)
+            end
+        end
+        print("NPC Hitbox toggled: ", state.enabledNPC)
+    end)
+
+    local playerToggleButton
+    success, result = pcall(function()
+        playerToggleButton = Instance.new("TextButton")
+        playerToggleButton.Size = UDim2.new(0.9, 0, 0, 60)
+        playerToggleButton.Position = UDim2.new(0.05, 0, 0.2, 10)
+        playerToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+        playerToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        playerToggleButton.Text = "Player Hitbox Expander: " .. (state.enabledPlayer and "ON" or "OFF")
+        playerToggleButton.Font = Enum.Font.SourceSans
+        playerToggleButton.TextSize = 18
+        playerToggleButton.Parent = mainFrame
+        playerToggleButton.BackgroundColor3 = state.enabledPlayer and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        print("Player Toggle Button created")
+        return playerToggleButton
+    end)
+    if not success then
+        warn("Failed to create Player Toggle Button: ", result)
+        return false
+    end
+
+    playerToggleButton.MouseButton1Click:Connect(function()
+        state.enabledPlayer = not state.enabledPlayer
+        playerToggleButton.Text = "Player Hitbox Expander: " .. (state.enabledPlayer and "ON" or "OFF")
+        playerToggleButton.BackgroundColor3 = state.enabledPlayer and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        if state.enabledPlayer then
+            for _, obj in ipairs(Workspace:GetDescendants()) do
+                applyPlayerHitboxChanges(obj)
+            end
+            playerConnection = Workspace.DescendantAdded:Connect(applyPlayerHitboxChanges)
+        else
+            if playerConnection then
+                playerConnection:Disconnect()
+                playerConnection = nil
+            end
+            for _, obj in ipairs(Workspace:GetDescendants()) do
+                revertPlayerHitboxChanges(obj)
+            end
+        end
+        print("Player Hitbox toggled: ", state.enabledPlayer)
+    end)
+
+    local autoMoveToggleButton
+    success, result = pcall(function()
+        autoMoveToggleButton = Instance.new("TextButton")
+        autoMoveToggleButton.Size = UDim2.new(0.9, 0, 0, 60)
+        autoMoveToggleButton.Position = UDim2.new(0.05, 0, 0.3, 10)
+        autoMoveToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+        autoMoveToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        autoMoveToggleButton.Text = "Auto Move to NPCs: " .. (state.autoMoveEnabled and "ON" or "OFF")
+        autoMoveToggleButton.Font = Enum.Font.SourceSans
+        autoMoveToggleButton.TextSize = 18
+        autoMoveToggleButton.Parent = mainFrame
+        autoMoveToggleButton.BackgroundColor3 = state.autoMoveEnabled and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        print("Auto-Move Toggle Button created")
+        return autoMoveToggleButton
+    end)
+    if not success then
+        warn("Failed to create Auto-Move Toggle Button: ", result)
+        return false
+    end
+
+    autoMoveToggleButton.MouseButton1Click:Connect(function()
+        state.autoMoveEnabled = not state.autoMoveEnabled
+        autoMoveToggleButton.Text = "Auto Move to NPCs: " .. (state.autoMoveEnabled and "ON" or "OFF")
+        autoMoveToggleButton.BackgroundColor3 = state.autoMoveEnabled and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        if state.autoMoveEnabled then
+            local character = player.Character
+            local playerHRP = character and character:FindFirstChild("HumanoidRootPart")
+            if playerHRP then
+                targetNPC, distance = findClosestNPC(playerHRP)
+                if targetNPC then
+                    print("Targeting NPC: ", targetNPC.Parent.Name, " Distance: ", distance)
+                else
+                    print("No living NPCs found")
+                    state.autoMoveEnabled = false
+                    autoMoveToggleButton.Text = "Auto Move to NPCs: OFF"
+                    autoMoveToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+                end
+            else
+                print("Player character not found")
+                state.autoMoveEnabled = false
+                autoMoveToggleButton.Text = "Auto Move to NPCs: OFF"
+                autoMoveToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+            end
+        else
+            targetNPC = nil
+            teleportedNPCs = {}
+            print("Auto Move to Closest NPC: OFF")
+        end
+        print("Auto-Move toggled: ", state.autoMoveEnabled)
+    end)
+
+    local flyToggleButton
+    success, result = pcall(function()
+        flyToggleButton = Instance.new("TextButton")
+        flyToggleButton.Size = UDim2.new(0.9, 0, 0, 60)
+        flyToggleButton.Position = UDim2.new(0.05, 0, 0.4, 10)
+        flyToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+        flyToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        flyToggleButton.Text = "Fly Platform: " .. (state.flying and "ON" or "OFF")
+        flyToggleButton.Font = Enum.Font.SourceSans
+        flyToggleButton.TextSize = 18
+        flyToggleButton.Parent = mainFrame
+        flyToggleButton.BackgroundColor3 = state.flying and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        print("Fly Toggle Button created")
+        return flyToggleButton
+    end)
+    if not success then
+        warn("Failed to create Fly Toggle Button: ", result)
+        return false
+    end
+
+    flyToggleButton.MouseButton1Click:Connect(function()
+        state.flying = not state.flying
+        flyToggleButton.Text = "Fly Platform: " .. (state.flying and "ON" or "OFF")
+        flyToggleButton.BackgroundColor3 = state.flying and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        if flyPlatform then
+            flyPlatform.Transparency = state.flying and 0.5 or 1
+            flyPlatform.CanCollide = state.flying
+            print("Fly Platform toggled: ", state.flying)
+        end
+    end)
+
+    local wasdToggleButton
+    success, result = pcall(function()
+        wasdToggleButton = Instance.new("TextButton")
+        wasdToggleButton.Size = UDim2.new(0.9, 0, 0, 60)
+        wasdToggleButton.Position = UDim2.new(0.05, 0, 0.5, 10)
+        wasdToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+        wasdToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        wasdToggleButton.Text = "WASD Movement: " .. (state.wasdEnabled and "ON" or "OFF")
+        wasdToggleButton.Font = Enum.Font.SourceSans
+        wasdToggleButton.TextSize = 18
+        wasdToggleButton.Parent = mainFrame
+        wasdToggleButton.BackgroundColor3 = state.wasdEnabled and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        print("WASD Toggle Button created")
+        return wasdToggleButton
+    end)
+    if not success then
+        warn("Failed to create WASD Toggle Button: ", result)
+        return false
+    end
+
+    local groundToggleButton
+    success, result = pcall(function()
+        groundToggleButton = Instance.new("TextButton")
+        groundToggleButton.Size = UDim2.new(0.9, 0, 0, 60)
+        groundToggleButton.Position = UDim2.new(0.05, 0, 0.6, 10)
+        groundToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+        groundToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        groundToggleButton.Text = "Ground Platform: " .. (state.groundPlatformActive and "ON" or "OFF")
+        groundToggleButton.Font = Enum.Font.SourceSans
+        groundToggleButton.TextSize = 18
+        groundToggleButton.Parent = mainFrame
+        groundToggleButton.BackgroundColor3 = state.groundPlatformActive and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        print("Ground Toggle Button created")
+        return groundToggleButton
+    end)
+    if not success then
+        warn("Failed to create Ground Toggle Button: ", result)
+        return false
+    end
+
+    local speedTextBox
+    success, result = pcall(function()
+        speedTextBox = Instance.new("TextBox")
+        speedTextBox.Size = UDim2.new(0.3, 0, 0, 50)
+        speedTextBox.Position = UDim2.new(0.7, 0, 0.7, 10)
+        speedTextBox.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+        speedTextBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+        speedTextBox.Text = tostring(wasdSpeed)
+        speedTextBox.Font = Enum.Font.SourceSans
+        speedTextBox.TextSize = 18
+        speedTextBox.Parent = mainFrame
+        print("Speed TextBox created")
+        return speedTextBox
+    end)
+    if not success then
+        warn("Failed to create Speed TextBox: ", result)
+        return false
+    end
+
+    local superJumpToggleButton
+    success, result = pcall(function()
+        superJumpToggleButton = Instance.new("TextButton")
+        superJumpToggleButton.Size = UDim2.new(0.9, 0, 0, 60)
+        superJumpToggleButton.Position = UDim2.new(0.05, 0, 0.7, 10)
+        superJumpToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+        superJumpToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        superJumpToggleButton.Text = "Super Jump: " .. (state.superJumpEnabled and "ON (F)" or "OFF (F)")
+        superJumpToggleButton.Font = Enum.Font.SourceSans
+        superJumpToggleButton.TextSize = 18
+        superJumpToggleButton.Parent = mainFrame
+        superJumpToggleButton.BackgroundColor3 = state.superJumpEnabled and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        print("Super Jump Toggle Button created")
+        return superJumpToggleButton
+    end)
+    if not success then
+        warn("Failed to create Super Jump Toggle Button: ", result)
+        return false
+    end
+
+    local espToggleButton
+    success, result = pcall(function()
+        espToggleButton = Instance.new("TextButton")
+        espToggleButton.Size = UDim2.new(0.9, 0, 0, 60)
+        espToggleButton.Position = UDim2.new(0.05, 0, 0.8, 10)
+        espToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+        espToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        espToggleButton.Text = "ESP Toggle: " .. (state.espEnabled and "ON" or "OFF")
+        espToggleButton.Font = Enum.Font.SourceSans
+        espToggleButton.TextSize = 18
+        espToggleButton.Parent = mainFrame
+        espToggleButton.BackgroundColor3 = state.espEnabled and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        print("ESP Toggle Button created")
+        return espToggleButton
+    end)
+    if not success then
+        warn("Failed to create ESP Toggle Button: ", result)
+        return false
+    end
+
+    local spectateToggleButton
+    success, result = pcall(function()
+        spectateToggleButton = Instance.new("TextButton")
+        spectateToggleButton.Size = UDim2.new(0.9, 0, 0, 60)
+        spectateToggleButton.Position = UDim2.new(0.05, 0, 0.9, 10)
+        spectateToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+        spectateToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        spectateToggleButton.Text = "Spectate: " .. (state.spectateMode and "ON (N/B/M)" or "OFF (N/B/M)")
+        spectateToggleButton.Font = Enum.Font.SourceSans
+        spectateToggleButton.TextSize = 18
+        spectateToggleButton.Parent = mainFrame
+        spectateToggleButton.BackgroundColor3 = state.spectateMode and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        print("Spectate Toggle Button created")
+        return spectateToggleButton
+    end)
+    if not success then
+        warn("Failed to create Spectate Toggle Button: ", result)
+        return false
+    end
+
+    local teleportToggleButton
+    success, result = pcall(function()
+        teleportToggleButton = Instance.new("TextButton")
+        teleportToggleButton.Size = UDim2.new(0.9, 0, 0, 60)
+        teleportToggleButton.Position = UDim2.new(0.05, 0, 0.1, 10)
+        teleportToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+        teleportToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        teleportToggleButton.Text = "Teleport: " .. (state.teleportEnabled and "ON (T)" or "OFF (T)")
+        teleportToggleButton.Font = Enum.Font.SourceSans
+        teleportToggleButton.TextSize = 18
+        teleportToggleButton.Parent = opFrame
+        teleportToggleButton.BackgroundColor3 = state.teleportEnabled and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        print("Teleport Toggle Button created")
+        return teleportToggleButton
+    end)
+    if not success then
+        warn("Failed to create Teleport Toggle Button: ", result)
+        return false
+    end
+
+    local noclipToggleButton
+    success, result = pcall(function()
+        noclipToggleButton = Instance.new("TextButton")
+        noclipToggleButton.Size = UDim2.new(0.9, 0, 0, 60)
+        noclipToggleButton.Position = UDim2.new(0.05, 0, 0.2, 10)
+        noclipToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+        noclipToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        noclipToggleButton.Text = "Noclip: " .. (state.noclipEnabled and "ON" or "OFF")
+        noclipToggleButton.Font = Enum.Font.SourceSans
+        noclipToggleButton.TextSize = 18
+        noclipToggleButton.Parent = opFrame
+        noclipToggleButton.BackgroundColor3 = state.noclipEnabled and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        print("Noclip Toggle Button created")
+        return noclipToggleButton
+    end)
+    if not success then
+        warn("Failed to create Noclip Toggle Button: ", result)
+        return false
+    end
+
+    local weirdToggleButton
+    success, result = pcall(function()
+        weirdToggleButton = Instance.new("TextButton")
+        weirdToggleButton.Size = UDim2.new(0.9, 0, 0, 60)
+        weirdToggleButton.Position = UDim2.new(0.05, 0, 0.3, 10)
+        weirdToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+        weirdToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        weirdToggleButton.Text = "Weird: " .. (state.weirdEnabled and "ON (G)" or "OFF (G)")
+        weirdToggleButton.Font = Enum.Font.SourceSans
+        weirdToggleButton.TextSize = 18
+        weirdToggleButton.Parent = opFrame
+        weirdToggleButton.BackgroundColor3 = state.weirdEnabled and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        print("Weird Toggle Button created")
+        return weirdToggleButton
+    end)
+    if not success then
+        warn("Failed to create Weird Toggle Button: ", result)
+        return false
+    end
+
+    -- Connect Button Events
+    mainArrowButton.MouseButton1Click:Connect(function()
+        state.onSecondPage = true
+        mainFrame.Visible = false
+        opFrame.Visible = true
+        print("Switched to OP Page")
+    end)
+
+    opArrowButton.MouseButton1Click:Connect(function()
+        state.onSecondPage = false
+        mainFrame.Visible = true
+        opFrame.Visible = false
+        print("Switched back to Main Page")
+    end)
+
+    closeButton.MouseButton1Click:Connect(function()
+        state.guiVisible = false
+        screenGui.Enabled = false
+        print("GUI closed via button")
+    end)
+
+    groundToggleButton.MouseButton1Click:Connect(function()
+        if not groundPlatform then
+            warn("Ground Platform not available")
+            state.groundPlatformActive = false
+            groundToggleButton.Text = "Ground Platform: OFF"
+            groundToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+            return
+        end
+        state.groundPlatformActive = not state.groundPlatformActive
+        groundToggleButton.Text = "Ground Platform: " .. (state.groundPlatformActive and "ON" or "OFF")
+        groundToggleButton.BackgroundColor3 = state.groundPlatformActive and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        if state.groundPlatformActive then
+            local character = player.Character
+            local hrp = character and character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                groundPlatformY = hrp.Position.Y
+                groundTargetY = groundPlatformY - CHARACTER_HEIGHT + 2.0
+                groundPlatform.Transparency = 0.5
+                groundPlatform.CanCollide = true
+                groundPlatform.Position = Vector3.new(hrp.Position.X, groundPlatformY - CHARACTER_HEIGHT - 0.5, hrp.Position.Z)
+                groundLifting = true
+                groundLiftTime = 0
+                print("Ground Platform toggled ON: Position=", groundPlatform.Position)
+            else
+                state.groundPlatformActive = false
+                groundPlatform.Transparency = 1
+                groundPlatform.CanCollide = false
+                groundPlatform.Position = Vector3.new(0, -100, 0)
+                groundToggleButton.Text = "Ground Platform: OFF"
+                groundToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+                print("Ground toggle ON failed: No HRP")
+            end
+        else
+            groundLifting = false
+            groundLiftTime = 0
+            groundPlatform.Transparency = 1
+            groundPlatform.CanCollide = false
+            groundPlatform.Position = Vector3.new(0, -100, 0)
+            print("Ground Platform toggled OFF")
+        end
+    end)
+
+    speedTextBox.FocusLost:Connect(function(enterPressed)
+        if enterPressed then
+            local input = tonumber(speedTextBox.Text)
+            if input and input >= 0.1 and input <= 2.0 then
+                wasdSpeed = input
+                print("WASD Speed set to: ", wasdSpeed)
+            else
+                speedTextBox.Text = tostring(wasdSpeed)
+                print("Invalid speed input, reverted to: ", wasdSpeed)
+            end
+        end
+    end)
+
+    superJumpToggleButton.MouseButton1Click:Connect(function()
+        state.superJumpEnabled = not state.superJumpEnabled
+        superJumpToggleButton.Text = "Super Jump: " .. (state.superJumpEnabled and "ON (F)" or "OFF (F)")
+        superJumpToggleButton.BackgroundColor3 = state.superJumpEnabled and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        print("Super Jump toggled: ", state.superJumpEnabled)
+    end)
+
+    espToggleButton.MouseButton1Click:Connect(function()
+        state.espEnabled = not state.espEnabled
+        espToggleButton.Text = "ESP Toggle: " .. (state.espEnabled and "ON" or "OFF")
+        espToggleButton.BackgroundColor3 = state.espEnabled and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        if state.espEnabled then
+            setupESP()
+        else
+            for player in pairs(espCache) do
+                removeESP(player)
+            end
+        end
+        updateESP()
+        print("ESP toggled: ", state.espEnabled)
+    end)
+
+    spectateToggleButton.MouseButton1Click:Connect(function()
+        state.spectateMode = not state.spectateMode
+        isSpectating = state.spectateMode
+        spectateToggleButton.Text = "Spectate: " .. (state.spectateMode and "ON (N/B/M)" or "OFF (N/B/M)")
+        spectateToggleButton.BackgroundColor3 = state.spectateMode and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        if state.spectateMode then
+            updateTargets()
+            if #targets > 0 then
+                isSpectating = true
+                mouseLocked = true
+                UserInputService.MouseBehavior = Enum.MouseBehavior.LockCurrentPosition
+                cycleTarget(true)
+            else
+                isSpectating = false
+                state.spectateMode = false
+                spectateToggleButton.Text = "Spectate: OFF (N/B/M)"
+                spectateToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+                print("No targets available, disabling spectate mode")
+            end
+        else
+            isSpectating = false
+            mouseLocked = false
+            UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+            Camera.CameraType = Enum.CameraType.Custom
+            Camera.CameraSubject = player.Character and player.Character:FindFirstChild("Humanoid")
+            Camera.FieldOfView = 70
+            print("Spectate mode disabled")
+        end
+    end)
+
+    teleportToggleButton.MouseButton1Click:Connect(function()
+        state.teleportEnabled = not state.teleportEnabled
+        teleportToggleButton.Text = "Teleport: " .. (state.teleportEnabled and "ON (T)" or "OFF (T)")
+        teleportToggleButton.BackgroundColor3 = state.teleportEnabled and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        print("Teleport toggled: ", state.teleportEnabled)
+    end)
+
+    noclipToggleButton.MouseButton1Click:Connect(function()
+        state.noclipEnabled = not state.noclipEnabled
+        noclipToggleButton.Text = "Noclip: " .. (state.noclipEnabled and "ON" or "OFF")
+        noclipToggleButton.BackgroundColor3 = state.noclipEnabled and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        local character = player.Character
+        if character then
+            for _, part in pairs(character:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.CanCollide = not state.noclipEnabled
+                end
+            end
+        end
+        print("Noclip toggled: ", state.noclipEnabled)
+    end)
+
+    weirdToggleButton.MouseButton1Click:Connect(function()
+        state.weirdEnabled = not state.weirdEnabled
+        weirdToggleButton.Text = "Weird: " .. (state.weirdEnabled and "ON (G)" or "OFF (G)")
+        weirdToggleButton.BackgroundColor3 = state.weirdEnabled and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        print("Weird toggled: ", state.weirdEnabled)
+    end)
+
+    -- Key Inputs for WASD
+    local function connectKeyInputs()
+        if keyConnections.began then keyConnections.began:Disconnect() end
+        if keyConnections.ended then keyConnections.ended:Disconnect() end
+        keyConnections.began = UserInputService.InputBegan:Connect(function(input, gpe)
+            if gpe then return end
+            local key = input.KeyCode
+            if key == Enum.KeyCode.W then keys.W = true end
+            if key == Enum.KeyCode.A then keys.A = true end
+            if key == Enum.KeyCode.S then keys.S = true end
+            if key == Enum.KeyCode.D then keys.D = true end
+        end)
+        keyConnections.ended = UserInputService.InputEnded:Connect(function(input)
+            local key = input.KeyCode
+            if key == Enum.KeyCode.W then keys.W = false end
+            if key == Enum.KeyCode.A then keys.A = false end
+            if key == Enum.KeyCode.S then keys.S = false end
+            if key == Enum.KeyCode.D then keys.D = false end
+        end)
+    end
+
+    wasdToggleButton.MouseButton1Click:Connect(function()
+        state.wasdEnabled = not state.wasdEnabled
+        wasdToggleButton.Text = "WASD Movement: " .. (state.wasdEnabled and "ON" or "OFF")
+        wasdToggleButton.BackgroundColor3 = state.wasdEnabled and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        if state.wasdEnabled then
+            connectKeyInputs()
+        else
+            if keyConnections.began then keyConnections.began:Disconnect() end
+            if keyConnections.ended then keyConnections.ended:Disconnect() end
+            keys.W, keys.A, keys.S, keys.D = false, false, false, false
+        end
+    end)
+
+    -- Dragging for Main Frame
+    local dragging = false
+    local dragInput, dragStart, startPos
+    mainFrame.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            dragStart = input.Position
+            startPos = mainFrame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+
+    mainFrame.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement and dragging then
+            local delta = input.Position - dragStart
+            mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            initialPosition = mainFrame.Position
+            opFrame.Position = mainFrame.Position
+        end
+    end)
+
+    -- Dragging for OP Frame
+    local draggingOP = false
+    local dragInputOP, dragStartOP, startPosOP
+    opFrame.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            draggingOP = true
+            dragStartOP = input.Position
+            startPosOP = opFrame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    draggingOP = false
+                end
+            end)
+        end
+    end)
+
+    opFrame.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement and draggingOP then
+            local delta = input.Position - dragStartOP
+            opFrame.Position = UDim2.new(startPosOP.X.Scale, startPosOP.X.Offset + delta.X, startPosOP.Y.Scale, startPosOP.Y.Offset + delta.Y)
+            initialPosition = opFrame.Position
+            mainFrame.Position = opFrame.Position
+        end
+    end)
+
+    -- Input Handlers
+    UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        if state.spectateMode then
+            if input.KeyCode == Enum.KeyCode.N and isSpectating then
+                cycleTarget(true)
+            elseif input.KeyCode == Enum.KeyCode.B and isSpectating then
+                cycleTarget(false)
+            elseif input.KeyCode == Enum.KeyCode.M then
+                if isSpectating then
+                    isSpectating = false
+                    mouseLocked = false
+                    UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+                    Camera.CameraType = Enum.CameraType.Custom
+                    Camera.CameraSubject = player.Character and player.Character:FindFirstChild("Humanoid")
+                    Camera.FieldOfView = 70
+                else
+                    isSpectating = true
+                    mouseLocked = true
+                    UserInputService.MouseBehavior = Enum.MouseBehavior.LockCurrentPosition
+                    updateTargets()
+                    if #targets > 0 then
+                        cycleTarget(true)
+                    else
+                        isSpectating = false
+                        mouseLocked = false
+                        UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+                    end
+                end
+            end
+        end
+        if input.KeyCode == Enum.KeyCode.F and state.superJumpEnabled then
+            local char = player.Character
+            if char and char:FindFirstChild("HumanoidRootPart") then
+                local hrp = char.HumanoidRootPart
+                local newPosition = hrp.Position + Vector3.new(0, JUMP_POWER, 0)
+                hrp.CFrame = CFrame.new(newPosition)
+            end
+        end
+        if input.KeyCode == Enum.KeyCode.G then
+            state.weirdEnabled = not state.weirdEnabled
+            weirdToggleButton.Text = "Weird: " .. (state.weirdEnabled and "ON (G)" or "OFF (G)")
+            weirdToggleButton.BackgroundColor3 = state.weirdEnabled and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(70, 70, 70)
+        end
+        if input.KeyCode == Enum.KeyCode.L then
+            state.guiVisible = not state.guiVisible
+            screenGui.Enabled = state.guiVisible
+            print("GUI visibility toggled: ", state.guiVisible)
+        end
+        if state.teleportEnabled and input.KeyCode == state.teleportKey then
+            local closestPlayer = nil
+            local closestDistance = math.huge
+            local character = player.Character
+            local hrp = character and character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                for _, plr in pairs(Players:GetPlayers()) do
+                    if plr ~= player and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
+                        local dist = (hrp.Position - plr.Character.HumanoidRootPart.Position).Magnitude
+                        if dist < closestDistance then
+                            closestDistance = dist
+                            closestPlayer = plr
+                        end
+                    end
+                end
+                if closestPlayer and closestPlayer.Character and closestPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                    local targetPos = closestPlayer.Character.HumanoidRootPart.Position
+                    local tpPos = targetPos - Vector3.new(0, 12, 0)
+                    hrp.CFrame = CFrame.new(tpPos)
+                    local platform = Instance.new("Part")
+                    platform.Size = Vector3.new(10, 1, 10)
+                    platform.Anchored = true
+                    platform.CanCollide = true
+                    platform.Transparency = 1
+                    platform.Position = tpPos - Vector3.new(0, 3, 0)
+                    platform.Parent = Workspace
+                    delay(5, function() if platform then platform:Destroy() end end)
+                end
+            end
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(handleMouseInput)
+
+    -- Weird Effect
+    local weirdParts = {}
+    local function updateWeirdParts()
+        local character = player.Character
+        if character then
+            weirdParts = {}
+            for _, partName in ipairs({"Head", "Torso", "HumanoidRootPart", "LeftArm", "RightArm", "LeftLeg", "RightLeg"}) do
+                local part = character:FindFirstChild(partName)
+                if part and part:IsA("BasePart") then
+                    table.insert(weirdParts, part)
+                end
+            end
+        end
+    end
+
+    player.CharacterAdded:Connect(updateWeirdParts)
+
+    -- Main Loop
+    RunService.Heartbeat:Connect(function(deltaTime)
+        if state.flying and flyPlatform then
+            local character = player.Character
+            local hrp = character and character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                flyPlatform.Position = hrp.Position - Vector3.new(0, 3, 0)
+            else
+                state.flying = false
+                flyToggleButton.Text = "Fly Platform: OFF"
+                flyToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+                if flyPlatform then
+                    flyPlatform.Transparency = 1
+                    flyPlatform.CanCollide = false
+                end
+            end
+        end
+
+        if state.groundPlatformActive and groundPlatform then
+            local character = player.Character
+            local hrp = character and character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local targetY = groundPlatformY
+                if groundLifting then
+                    groundLiftTime = groundLiftTime + deltaTime
+                    local alpha = math.clamp(groundLiftTime / LIFT_DURATION, 0, 1)
+                    targetY = groundPlatformY + (groundTargetY - groundPlatformY) * alpha
+                    if alpha >= 1 then
+                        groundLifting = false
+                        groundLiftTime = 0
+                    end
+                end
+                groundPlatform.Position = Vector3.new(hrp.Position.X, targetY, hrp.Position.Z)
+            else
+                state.groundPlatformActive = false
+                groundLifting = false
+                groundLiftTime = 0
+                groundPlatform.Transparency = 1
+                groundPlatform.CanCollide = false
+                groundPlatform.Position = Vector3.new(0, -100, 0)
+                groundToggleButton.Text = "Ground Platform: OFF"
+                groundToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+            end
+        end
+
+        if state.wasdEnabled then
+            local character = player.Character
+            local hrp = character and character:FindFirstChild("HumanoidRootPart")
+            local cam = Workspace.CurrentCamera
+            if hrp and cam then
+                local move = Vector3.zero
+                if keys.W then move = move + cam.CFrame.LookVector end
+                if keys.S then move = move - cam.CFrame.LookVector end
+                if keys.A then move = move - cam.CFrame.RightVector end
+                if keys.D then move = move + cam.CFrame.RightVector end
+                if move.Magnitude > 0 then
+                    move = move.Unit * wasdSpeed
+                    hrp.CFrame = hrp.CFrame + Vector3.new(move.X, 0, move.Z)
+                end
+            else
+                state.wasdEnabled = false
+                wasdToggleButton.Text = "WASD Movement: OFF"
+                wasdToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+                if keyConnections.began then keyConnections.began:Disconnect() end
+                if keyConnections.ended then keyConnections.ended:Disconnect() end
+                keys.W, keys.A, keys.S, keys.D = false, false, false, false
+            end
+        end
+
+        if state.autoMoveEnabled and targetNPC then
+            local character = player.Character
+            local playerHRP = character and character:FindFirstChild("HumanoidRootPart")
+            if not playerHRP then
+                state.autoMoveEnabled = false
+                targetNPC = nil
+                autoMoveToggleButton.Text = "Auto Move to NPCs: OFF"
+                autoMoveToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+                return
+            end
+            
+            local model = targetNPC.Parent
+            local humanoid = model and model:FindFirstChildOfClass("Humanoid")
+            if not model or not humanoid or humanoid.Health <= 0 or humanoid.Parent != model then
+                targetNPC = nil
+                targetNPC, distance = findClosestNPC(playerHRP)
+                if targetNPC then
+                    print("Retargeting NPC: ", targetNPC.Parent.Name, " Distance: ", distance)
+                else
+                    state.autoMoveEnabled = false
+                    autoMoveToggleButton.Text = "Auto Move to NPCs: OFF"
+                    autoMoveToggleButton.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+                end
+                return
+            end
+            
+            local distance = (targetNPC.Position - playerHRP.Position).Magnitude
+            if distance > TELEPORT_DISTANCE then
+                local direction = (targetNPC.Position - playerHRP.Position).Unit
+                local newPosition = playerHRP.Position + direction * cframeSpeed
+                playerHRP.CFrame = CFrame.new(newPosition, targetNPC.Position)
+            else
+                playerHRP.CFrame = CFrame.new(targetNPC.Position - Vector3.new(0, 2, 0), targetNPC.Position)
+                teleportedNPCs[targetNPC] = true
+                targetNPC = nil
+                targetNPC, distance = findClosestNPC(playerHRP)
+                if targetNPC then
+                    print("Retargeting next NPC: ", targetNPC.Parent.Name, " Distance: ", distance)
+                end
+            end
+        end
+
+        if state.autoMoveEnabled and not targetNPC then
+            local character = player.Character
+            local playerHRP = character and character:FindFirstChild("HumanoidRootPart")
+            if playerHRP then
+                targetNPC, distance = findClosestNPC(playerHRP)
+                if targetNPC then
+                    print("Retargeting NPC: ", targetNPC.Parent.Name, " Distance: ", distance)
+                end
+            end
+        end
+
+        if state.weirdEnabled and #weirdParts > 0 then
+            for _, part in ipairs(weirdParts) do
+                if part and part:IsA("BasePart") then
+                    local jitterPos = Vector3.new(
+                        math.random(-15, 15) / 10,
+                        math.random(-15, 15) / 10,
+                        math.random(-15, 15) / 10
+                    )
+                    local jitterRot = CFrame.Angles(
+                        math.rad(math.random(-20, 20)),
+                        math.rad(math.random(-20, 20)),
+                        math.rad(math.random(-20, 20))
+                    )
+                    part.CFrame = part.CFrame * jitterRot * CFrame.new(jitterPos)
+                end
+            end
+        end
+
+        if state.noclipEnabled then
+            local character = player.Character
+            if character then
+                for _, part in pairs(character:GetDescendants()) do
+                    if part:IsA("BasePart") then
+                        part.CanCollide = false
+                    end
+                end
+            end
+        end
+
+        if isSpectating then
+            updateTargets()
+            updateCamera()
+        end
+    end)
+
+    Players.PlayerAdded:Connect(function(plr)
+        plr.CharacterAdded:Wait()
+        if state.espEnabled and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
+            createESP(plr.Character)
+        end
+    end)
+
+    Players.PlayerRemoving:Connect(function(plr)
+        if isSpectating then updateTargets() end
+    end)
+
+    player.CharacterAdded:Connect(function()
+        if not isSpectating then
+            Camera.CameraType = Enum.CameraType.Custom
+            Camera.CameraSubject = player.Character and player.Character:FindFirstChild("Humanoid")
+            Camera.FieldOfView = 70
+        end
+        if state.espEnabled then
+            setupESP()
+        end
+    end)
+
+    return true
+end
+
+-- Initialize GUI
+local success, errorMsg = pcall(initializeGUI)
+if not success then
+    warn("GUI initialization failed: ", errorMsg)
+end
+
+-- Cleanup on Player Leave
+player.AncestorRemoved:Connect(function()
+    if flyPlatform then flyPlatform:Destroy() end
+    if groundPlatform then groundPlatform:Destroy() end
+    if screenGui then screenGui:Destroy() end
+    if npcConnection then npcConnection:Disconnect() end
+    if playerConnection then playerConnection:Disconnect() end
+    if espFolder then espFolder:Destroy() end
+    print("GUI and platforms destroyed on player leave")
+end)
+
+print("Hitbox Control GUI loaded at ", tick())
